@@ -12,6 +12,7 @@
     <tr><td>Amount</td><td>${{ amount }}</td></tr>
     <tr><td>Payment Method</td><td>{{ payment_method }}</td></tr>
     <tr><td>Status</td><td>Confirmed</td></tr>
+    {% if new_balance %}<tr><td>Wallet Balance</td><td>${{ new_balance }}</td></tr>{% endif %}
     <tr><td>Date</td><td>{{ date }}</td></tr>
   </table>
 

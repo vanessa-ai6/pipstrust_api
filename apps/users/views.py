@@ -27,8 +27,24 @@ def api_response(data=None, message='', status_str='success', errors=None, http_
             'data': data,
             'errors': errors,
             'meta': {'timestamp': timezone.now().isoformat(), 'version': '1.0.1'}
-        }
+        },
+        status=http_status,
     )
+
+def send_otp_safely(user, otp):
+    """Try to email an OTP. Returns True/False; the failure itself is stored in EmailLog."""
+    try:
+        send_otp_email(user, otp)
+        return True
+    except Exception:
+        return False
+
+
+EMAIL_FAILED_MESSAGE = (
+    "We couldn't send the email right now. Please try again in a few minutes, "
+    "or contact support if it keeps happening."
+)
+
 
 class OTPRateThrottle(AnonRateThrottle):
     rate = '5/hour'
@@ -55,10 +71,15 @@ class RegisterView(APIView):
             )
         user = serializer.save()
         otp = create_otp(user, 'email_verification')
-        send_otp_email(user, otp)
+        email_sent = send_otp_safely(user, otp)
         return api_response(
-            data={'email': user.email},
-            message='Registration successful. Please check your email to verify your account.',
+            data={'email': user.email, 'email_sent': email_sent},
+            message=(
+                'Registration successful. Please check your email to verify your account.'
+                if email_sent else
+                "Registration successful, but we couldn't send the verification email. "
+                "Please use 'Resend code' on the next screen."
+            ),
             http_status=201
         )
 
@@ -113,7 +134,8 @@ class ResendOTPView(APIView):
             return api_response(message='User not found.', status_str='error', http_status=404)
 
         otp = create_otp(user, serializer.validated_data['purpose'])
-        send_otp_email(user, otp)
+        if not send_otp_safely(user, otp):
+            return api_response(message=EMAIL_FAILED_MESSAGE, status_str='error', http_status=503)
         return api_response(message='OTP sent successfully. Check your email.')
 
 
@@ -140,9 +162,13 @@ class LoginView(APIView):
         if not user.is_verified:
             # Re-send verification OTP
             otp = create_otp(user, 'email_verification')
-            send_otp_email(user, otp)
+            email_sent = send_otp_safely(user, otp)
             return api_response(
-                message='Email not verified. A new OTP has been sent to your email.',
+                message=(
+                    'Email not verified. A new OTP has been sent to your email.'
+                    if email_sent else
+                    "Email not verified, and we couldn't send a new code right now. Please tap 'Resend code'."
+                ),
                 status_str='error',
                 errors={'requires_verification': True, 'email': user.email},
                 http_status=403,
@@ -188,7 +214,7 @@ class PasswordResetRequestView(APIView):
         try:
             user = User.objects.get(email=serializer.validated_data['email'])
             otp = create_otp(user, 'password_reset')
-            send_otp_email(user, otp)
+            send_otp_safely(user, otp)
         except User.DoesNotExist:
             pass  # Don't reveal if email exists
         return api_response(message='If an account exists with this email, a reset OTP has been sent.')

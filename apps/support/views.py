@@ -5,6 +5,7 @@ from django.db import transaction
 from drf_spectacular.utils import extend_schema
 
 from apps.admin_api.permissions import IsAdminUser
+from apps.notifications.email_utils import notify_admins, send_email_after_commit, send_html_email
 from apps.notifications.models import Notification
 from apps.users.views import api_response
 
@@ -15,6 +16,21 @@ from .serializers import (
     SupportTicketSerializer,
     TicketReplySerializer,
 )
+
+
+def _excerpt(text, length=500):
+    text = (text or '').strip()
+    return text if len(text) <= length else text[:length] + '...'
+
+
+def _email_user(ticket, subject, message):
+    """Email the ticket owner (after the surrounding transaction commits)."""
+    send_email_after_commit(
+        subject=subject,
+        template_name='broadcast',
+        context={'user': ticket.user, 'user_name': ticket.user.full_name, 'message': message},
+        recipient_list=[ticket.user.email],
+    )
 
 
 @extend_schema(tags=['Support'])
@@ -34,6 +50,30 @@ class SupportTicketListCreateView(generics.GenericAPIView):
                 errors=serializer.errors, http_status=400,
             )
         ticket = serializer.save()
+        first_message = ticket.messages.first()
+
+        notify_admins(
+            subject=f'New Support Ticket: {ticket.subject}',
+            message=(
+                f'{request.user.email} opened a {ticket.priority}-priority {ticket.category} ticket '
+                f'(#{str(ticket.id)[:8]}).\n\nSubject: {ticket.subject}\n\n'
+                f'{_excerpt(first_message.message if first_message else "")}'
+            ),
+        )
+        send_html_email(
+            subject=f'We received your support ticket - {ticket.subject}',
+            template_name='broadcast',
+            context={
+                'user': request.user,
+                'user_name': request.user.full_name,
+                'message': (
+                    f'Thanks for contacting PipsTrust support. Your ticket "{ticket.subject}" '
+                    f'(#{str(ticket.id)[:8]}) has been received and our team will reply as soon as possible.\n\n'
+                    'You can follow the conversation under Support Tickets in your account.'
+                ),
+            },
+            recipient_list=[request.user.email],
+        )
         return api_response(
             data=SupportTicketSerializer(ticket).data,
             message='Support ticket created successfully.', http_status=201,
@@ -71,6 +111,13 @@ class SupportTicketReplyView(APIView):
             ticket.status = 'open'
             ticket.save(update_fields=['status', 'updated_at'])
 
+        notify_admins(
+            subject=f'New reply on support ticket: {ticket.subject}',
+            message=(
+                f'{request.user.email} replied on ticket #{str(ticket.id)[:8]} ({ticket.subject}):\n\n'
+                f'{_excerpt(serializer.validated_data["message"])}'
+            ),
+        )
         return api_response(data=SupportTicketSerializer(ticket).data, message='Reply sent.')
 
 
@@ -115,8 +162,28 @@ class AdminSupportTicketActionView(APIView):
                     message=f'You have a new reply on “{ticket.subject}”.',
                     type='info',
                 )
+                _email_user(
+                    ticket,
+                    f'Support replied to your ticket - {ticket.subject}',
+                    f'Our support team replied to your ticket "{ticket.subject}":\n\n{_excerpt(message)}\n\n'
+                    'Open Support Tickets in your account to continue the conversation.',
+                )
             if 'status' in serializer.validated_data:
-                ticket.status = serializer.validated_data['status']
+                new_status = serializer.validated_data['status']
+                if new_status == 'closed' and ticket.status != 'closed':
+                    Notification.objects.create(
+                        user=ticket.user,
+                        title='Support ticket closed',
+                        message=f'Your ticket “{ticket.subject}” has been closed.',
+                        type='info',
+                    )
+                    _email_user(
+                        ticket,
+                        f'Your support ticket was closed - {ticket.subject}',
+                        f'Your ticket "{ticket.subject}" (#{str(ticket.id)[:8]}) has been closed. '
+                        'If you still need help, open a new ticket from your account.',
+                    )
+                ticket.status = new_status
             ticket.save(update_fields=['status', 'updated_at'])
 
         return api_response(data=SupportTicketSerializer(ticket).data, message='Ticket updated.')

@@ -3,6 +3,7 @@ from rest_framework import serializers
 from apps.users.models import User, UserProfile
 from apps.investments.models import InvestmentPlan, Deposit, Investment, Transaction
 from apps.withdrawals.models import Withdrawal
+from apps.notifications.models import EmailLog
 
 
 class AdminUserSerializer(serializers.ModelSerializer):
@@ -122,3 +123,25 @@ class AdminCreditWalletSerializer(serializers.Serializer):
     user_id = serializers.UUIDField()
     amount = serializers.DecimalField(max_digits=18, decimal_places=2)
     description = serializers.CharField(max_length=255, default='Manual credit by admin')
+
+    def validate_amount(self, value):
+        if value <= 0:
+            raise serializers.ValidationError("Amount must be greater than zero.")
+        return value
+
+
+class AdminEmailLogSerializer(serializers.ModelSerializer):
+    user_email = serializers.CharField(source='user.email', read_only=True, default=None)
+    retryable = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = EmailLog
+        fields = [
+            'id', 'recipient', 'user_email', 'subject', 'template', 'status',
+            'error', 'attempts', 'retryable', 'created_at', 'updated_at',
+        ]
+        read_only_fields = fields
+
+
+class AdminEmailTestSerializer(serializers.Serializer):
+    to = serializers.EmailField(required=False)

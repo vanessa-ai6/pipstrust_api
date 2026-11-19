@@ -172,10 +172,15 @@ EMAIL_BACKEND = config('EMAIL_BACKEND', default='django.core.mail.backends.smtp.
 EMAIL_HOST = config('EMAIL_HOST', default='smtp.gmail.com')
 EMAIL_PORT = config('EMAIL_PORT', default=587, cast=int)
 EMAIL_USE_TLS = config('EMAIL_USE_TLS', default=True, cast=bool)
+EMAIL_USE_SSL = config('EMAIL_USE_SSL', default=False, cast=bool)
+# Without a timeout an unreachable SMTP server blocks the request forever.
+EMAIL_TIMEOUT = config('EMAIL_TIMEOUT', default=15, cast=int)
 EMAIL_HOST_USER = config('EMAIL_HOST_USER', default='')
 EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='')
 DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default='PipsTrust <noreply@pipstrust.com>')
 SERVER_EMAIL = DEFAULT_FROM_EMAIL
+# One address, or several separated by commas. Active staff users are notified too
+# (see apps.notifications.email_utils.get_admin_emails).
 ADMIN_EMAIL = config('ADMIN_EMAIL', default='admin@pipstrust.com')
 
 # ─── OTP ─────────────────────────────────────────────────────────────────────
@@ -207,3 +212,15 @@ SPECTACULAR_SETTINGS = {
 
 # ─── Frontend ────────────────────────────────────────────────────────────────
 FRONTEND_URL = config('FRONTEND_URL', default='http://localhost:3000')
+
+# ─── Logging (email failures reach the server console as well as the EmailLog table) ──
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {'simple': {'format': '[{levelname}] {asctime} {name}: {message}', 'style': '{'},},
+    'handlers': {'console': {'class': 'logging.StreamHandler', 'formatter': 'simple'},},
+    'loggers': {
+        'django': {'handlers': ['console'], 'level': 'WARNING', 'propagate': False},
+        'apps': {'handlers': ['console'], 'level': 'INFO', 'propagate': False},
+    },
+}

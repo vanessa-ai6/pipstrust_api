@@ -16,7 +16,8 @@ from .serializers import (
     InvestmentCreateSerializer, InvestmentSerializer,
     TransactionSerializer, DashboardSummarySerializer,
 )
-from apps.notifications.email_utils import send_html_email
+from apps.notifications.email_utils import notify_admins, send_html_email
+from apps.notifications.models import Notification
 from apps.users.views import api_response
 from apps.users.models import UserProfile
 from .services import settle_matured_investments
@@ -48,22 +49,49 @@ class DepositCreateView(APIView):
         if not serializer.is_valid():
             return api_response(message='Validation failed.', status_str='error', errors=serializer.errors, http_status=400)
 
-        deposit = serializer.save(user=request.user)
+        with db_transaction.atomic():
+            deposit = serializer.save(user=request.user)
 
-        Transaction.objects.create(
-            user=request.user,
-            type='deposit',
-            amount=deposit.amount,
-            status='pending',
-            description=f'Deposit via {deposit.get_payment_method_display()}',
-            reference=str(deposit.id),
-        )
+            Transaction.objects.create(
+                user=request.user,
+                type='deposit',
+                amount=deposit.amount,
+                status='pending',
+                description=f'Deposit via {deposit.get_payment_method_display()}',
+                reference=str(deposit.id),
+            )
 
+            Notification.objects.create(
+                user=request.user,
+                title='Deposit Received',
+                message=f'We received your deposit of ${deposit.amount}. It will be added to your wallet balance once it is confirmed.',
+                type='info',
+            )
+
+        # Confirmation to the user and an alert to the admins. Failures are recorded in
+        # EmailLog (visible in the Django admin) and never block the deposit itself.
         send_html_email(
-            subject='New Deposit Submitted - PipsTrust',
+            subject='Deposit Received - PipsTrust',
             template_name='broadcast',
-            context={'user_name': 'Admin', 'message': f'User {request.user.email} submitted a deposit of ${deposit.amount} via {deposit.payment_method}.'},
-            recipient_list=[settings.ADMIN_EMAIL],
+            context={
+                'user': request.user,
+                'user_name': request.user.full_name,
+                'message': (
+                    f'We have received your deposit of ${deposit.amount} via {deposit.get_payment_method_display()}.\n\n'
+                    'It is now pending review. Once it is confirmed, the amount will be added to your '
+                    'wallet balance and you will receive another email.'
+                ),
+            },
+            recipient_list=[request.user.email],
+        )
+        notify_admins(
+            subject='New Deposit Submitted - PipsTrust',
+            message=(
+                f'User {request.user.email} submitted a deposit of ${deposit.amount} '
+                f'via {deposit.get_payment_method_display()}.\n'
+                f'Transaction hash: {deposit.transaction_hash or "not provided"}\n\n'
+                'Please review it in the admin panel and approve or reject it.'
+            ),
         )
 
         return api_response(data=DepositSerializer(deposit).data, message='Deposit submitted successfully.', http_status=201)
@@ -133,7 +161,6 @@ class InvestmentCreateView(APIView):
                     http_status=400,
                 )
             profile.wallet_balance -= amount
-            profile.total_deposited += amount
             profile.save(update_fields=['wallet_balance', 'updated_at'])
 
             investment = Investment.objects.create(
@@ -240,6 +267,7 @@ class DashboardSummaryView(APIView):
             total=Sum('amount')
         )['total'] or 0
         total_invested = user.investments.aggregate(total=Sum('amount'))['total'] or 0
+        pending_deposit_amount = user.deposits.filter(status='pending').aggregate(total=Sum('amount'))['total'] or 0
 
         data = {
             'wallet_balance': profile.wallet_balance,
@@ -250,6 +278,7 @@ class DashboardSummaryView(APIView):
             'active_investments': user.investments.filter(status='active').count(),
             'completed_investments': user.investments.filter(status='completed').count(),
             'pending_deposits': user.deposits.filter(status='pending').count(),
+            'pending_deposit_amount': pending_deposit_amount,
             'pending_withdrawals': user.withdrawal.filter(
                 status__in=['pending', 'otp_verified', 'processing']
             ).count(),

@@ -1,10 +1,13 @@
+from datetime import timedelta
+
+from django.utils import timezone
 from rest_framework import generics, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from drf_spectacular.utils import extend_schema
-from .models import Notification
-from .serializers import NotificationSerializer
+from .models import EmailLog, Notification
+from .serializers import NotificationSerializer, UserEmailLogSerializer
 from apps.users.views import api_response
 
 
@@ -56,3 +59,23 @@ class UnreadCountView(APIView):
     def get(self, request):
         count = Notification.objects.filter(user=request.user, is_read=False).count()
         return api_response(data={'unread_count': count})
+
+
+@extend_schema(tags=['Notifications'])
+class UserEmailLogView(APIView):
+    """The user's own most recent emails and whether they were delivered."""
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(summary='Recent emails sent to the current user (with delivery status)')
+    def get(self, request):
+        logs = EmailLog.objects.filter(user=request.user)[:20]
+        # Only recent, still-failing account emails count as "a problem". One-time-code
+        # emails are excluded: the user is told on screen when those fail and can resend.
+        since = timezone.now() - timedelta(days=7)
+        failed = EmailLog.objects.filter(
+            user=request.user, status='failed', created_at__gte=since,
+        ).exclude(template__in=EmailLog.NON_RETRYABLE_TEMPLATES).count()
+        return api_response(data={
+            'emails': UserEmailLogSerializer(logs, many=True).data,
+            'failed_count': failed,
+        })

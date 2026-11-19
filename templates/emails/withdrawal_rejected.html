@@ -1,21 +1,17 @@
 {% extends "emails/base.html" %}
 {% block content %}
-  <p>Hello <strong>{{ user.full_name }}</strong>,</p>
-  <p>Your withdrawal request has been <strong>rejected</strong>. The amount has been refunded to your wallet.</p>
-
-  <div class="status-box warning">
-    <div class="status-icon">⚠️</div>
-    <div class="status-text">Withdrawal Rejected & Refunded</div>
+  <div class="wrapper">
+    <div class="header">
+      <h1>PIPSTRUST</h1>
+      <p>Secure Investment Platform</p>
+    </div>
+    <div class="body">
+      <h1>Withdrawal Rejected & Refunded</h1><p>Hello {{ user_name }},</p><p>Your withdrawal of <strong>${{ amount }}</strong> via <strong>{{ method }}</strong> was rejected.</p>{% if admin_note %}<p>Reason: {{ admin_note }}</p>{% endif %}<p><strong>${{ refund_amount }}</strong> has been refunded to your wallet.</p>
+    </div>
+    <div class="footer">
+      <p>© 2025 PipsTrust. All rights reserved.</p>
+      <p><a href="{{ frontend_url }}">pipstrust.com</a> &nbsp;|&nbsp; <a href="mailto:support@pipstrust.com">support@pipstrust.com</a></p>
+      <p style="margin-top:8px; color:#ccc;">You are receiving this email because of activity on your PipsTrust account.</p>
+    </div>
   </div>
-
-  <table class="detail-table">
-    <tr><td>Amount</td><td>${{ amount }}</td></tr>
-    <tr><td>Method</td><td>{{ method }}</td></tr>
-    <tr><td>Status</td><td>Rejected</td></tr>
-    <tr><td>Date</td><td>{{ date }}</td></tr>
-    {% if reason %}<tr><td>Reason</td><td>{{ reason }}</td></tr>{% endif %}
-  </table>
-
-  <p>The full amount of <strong>${{ amount }}</strong> has been returned to your wallet balance.</p>
-  <a href="{{ frontend_url }}/withdrawals" class="btn">View Wallet</a>
 {% endblock %}

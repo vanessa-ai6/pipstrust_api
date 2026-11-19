@@ -1,0 +1,17 @@
+{% extends "emails/base.html" %}
+{% block content %}
+  <div class="wrapper">
+    <div class="header">
+      <h1>PIPSTRUST</h1>
+      <p>Secure Investment Platform</p>
+    </div>
+    <div class="body">
+      {% block content %}<h1>Investment Completed</h1><p>Hello {{ user_name }},</p><p>Your <strong>{{ plan_name }}</strong> investment of <strong>${{ amount }}</strong> has completed.</p><p><strong>${{ expected_return }}</strong> has been credited to your wallet, including your investment return.</p><p>Thank you for investing with PipsTrust.</p>{% endblock %}
+    </div>
+    <div class="footer">
+      <p>© 2025 PipsTrust. All rights reserved.</p>
+      <p><a href="{{ frontend_url }}">pipstrust.com</a> &nbsp;|&nbsp; <a href="mailto:support@pipstrust.com">support@pipstrust.com</a></p>
+      <p style="margin-top:8px; color:#ccc;">You are receiving this email because of activity on your PipsTrust account.</p>
+    </div>
+  </div>
+{% endblock %}

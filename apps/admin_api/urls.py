@@ -7,6 +7,7 @@ from .views import (
     AdminWithdrawalListView, AdminWithdrawalDetailView, AdminWithdrawalActionView,
     AdminPlanListCreateView, AdminPlanDetailView,
     AdminBroadcastView,
+    AdminEmailLogListView, AdminEmailLogRetryView, AdminEmailTestView,
 )
 
 urlpatterns = [
@@ -35,4 +36,9 @@ urlpatterns = [
 
     # Broadcast
     path('broadcast/', AdminBroadcastView.as_view(), name='admin-broadcast'),
+
+    # Email health: delivery log, retry, test
+    path('email-logs/', AdminEmailLogListView.as_view(), name='admin-email-logs'),
+    path('email-logs/<uuid:pk>/retry/', AdminEmailLogRetryView.as_view(), name='admin-email-log-retry'),
+    path('email-test/', AdminEmailTestView.as_view(), name='admin-email-test'),
 ]

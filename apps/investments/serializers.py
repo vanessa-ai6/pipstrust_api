@@ -100,5 +100,6 @@ class DashboardSummarySerializer(serializers.Serializer):
     active_investments = serializers.IntegerField()
     completed_investments = serializers.IntegerField()
     pending_deposits = serializers.IntegerField()
+    pending_deposit_amount = serializers.DecimalField(max_digits=18, decimal_places=2)
     pending_withdrawals = serializers.IntegerField()
     referral_count = serializers.IntegerField()

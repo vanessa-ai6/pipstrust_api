@@ -10,6 +10,7 @@ from .views import (
 
 urlpatterns = [
     path('tickets/', SupportTicketListCreateView.as_view(), name='support-ticket-list-create'),
+    path('tickets/create/', SupportTicketListCreateView.as_view(), name='support-ticket-create'),
     path('tickets/<uuid:pk>/', SupportTicketDetailView.as_view(), name='support-ticket-detail'),
     path('tickets/<uuid:pk>/reply/', SupportTicketReplyView.as_view(), name='support-ticket-reply'),
     path('admin/tickets/', AdminSupportTicketListView.as_view(), name='admin-support-ticket-list'),

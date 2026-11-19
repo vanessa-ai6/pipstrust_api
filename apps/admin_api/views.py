@@ -1,3 +1,5 @@
+from datetime import timedelta
+
 from rest_framework import generics, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -15,13 +17,19 @@ from .serializers import (
     AdminWithdrawalSerializer, AdminWithdrawalActionSerializer,
     AdminInvestmentPlanSerializer, AdminPlatformStatsSerializer,
     AdminBroadcastSerializer, AdminCreditWalletSerializer,
+    AdminEmailLogSerializer, AdminEmailTestSerializer,
 )
 from apps.users.models import User, UserProfile
 from apps.investments.models import InvestmentPlan, Deposit, Investment, Transaction
-from apps.investments.services import settle_matured_investments
+from apps.investments.services import (
+    DepositNotPending, confirm_deposit, lock_profile, reject_deposit, settle_matured_investments,
+)
 from apps.withdrawals.models import Withdrawal
-from apps.notifications.models import Notification
-from apps.notifications.email_utils import send_html_email
+from apps.withdrawals.services import WithdrawalNotActionable, complete_withdrawal, reject_withdrawal
+from apps.notifications.models import EmailLog, Notification
+from apps.notifications.email_utils import (
+    email_config_report, explain_smtp_error, retry_email, send_email_after_commit, send_html_email,
+)
 from apps.users.views import api_response
 
 
@@ -134,10 +142,10 @@ class AdminCreditWalletView(APIView):
         description = serializer.validated_data['description']
 
         with db_transaction.atomic():
-            profile = user.profile
+            profile = lock_profile(user)
             profile.wallet_balance += amount
             profile.total_earned += amount
-            profile.save()
+            profile.save(update_fields=['wallet_balance', 'total_earned', 'updated_at'])
 
             Transaction.objects.create(
                 user=user,
@@ -154,10 +162,16 @@ class AdminCreditWalletView(APIView):
                 type='success',
             )
 
-        send_html_email(
-                subject='Wallet Credited',
-                template_name='broadcast',
-                context={'user_name': 'User', 'message': f'Hello {user.full_name},\n\n${amount} has been credited to your wallet.\n\nPipsTrust Team'},
+            send_email_after_commit(
+                subject='Wallet Credited - PipsTrust',
+                template_name='wallet_created',
+                context={
+                    'user': user,
+                    'user_name': user.full_name,
+                    'amount': amount,
+                    'description': description,
+                    'new_balance': profile.wallet_balance,
+                },
                 recipient_list=[user.email],
             )
 
@@ -203,64 +217,14 @@ class AdminDepositActionView(APIView):
         action = serializer.validated_data['action']
         admin_note = serializer.validated_data.get('admin_note', '')
 
-        with db_transaction.atomic():
-            deposit = (Deposit.objects.select_for_update().select_related('user').filter(id=pk, status='pending').first())
-            if not deposit:
-                return api_response(message='Deposit not found or already processed.', status_str='error', http_status=404)
-            
+        try:
             if action == 'approve':
-                deposit.status = 'confirmed'
-                deposit.confirmed_at = timezone.now()
-                deposit.admin_note = admin_note
-                deposit.save()
-
-                profile = UserProfile.objects.select_for_update().get(user=deposit.user)
-                profile.wallet_balance += deposit.amount
-                profile.total_deposited += deposit.amount
-                profile.save(update_fields=['wallet_balance', 'total_deposit', 'updated_at'])
-
-                Transaction.objects.filter(
-                    reference=str(deposit.id), type='deposit'
-                ).update(status='success')
-
-                Notification.objects.create(
-                    user=deposit.user,
-                    title='Deposit Confirmed',
-                    message=f'Your deposit of ${deposit.amount} has been confirmed.',
-                    type='success',
-                )
-
-                send_html_email(
-                subject='Deposit Confirmed',
-                template_name='broadcast',
-                context={'user_name': 'User', 'message': f'Your deposit of ${deposit.amount} has been approved and added to your wallet.'},
-                recipient_list=[deposit.user.email],
-            )
-                return api_response(message='Deposit approved successfully.')
-
-            else:  # reject
-                deposit.status = 'rejected'
-                deposit.admin_note = admin_note
-                deposit.save()
-
-                Transaction.objects.filter(
-                    reference=str(deposit.id), type='deposit'
-                ).update(status='failed')
-
-                Notification.objects.create(
-                    user=deposit.user,
-                    title='Deposit Rejected',
-                    message=f'Your deposit of ${deposit.amount} was rejected. {admin_note}',
-                    type='error',
-                )
-
-                send_html_email(
-                subject='Deposit Rejected',
-                template_name='broadcast',
-                context={'user_name': 'User', 'message': f'Your deposit of ${deposit.amount} was rejected. Reason: {admin_note}'},
-                recipient_list=[deposit.user.email],
-            )
-                return api_response(message='Deposit rejected.')
+                confirm_deposit(pk, admin_note)  # credits wallet_balance + total_deposited atomically
+                return api_response(message='Deposit approved and credited to the user wallet.')
+            reject_deposit(pk, admin_note)
+            return api_response(message='Deposit rejected.')
+        except DepositNotPending:
+            return api_response(message='Deposit not found or already processed.', status_str='error', http_status=404)
 
 
 # ─── Withdrawal Management ────────────────────────────────────────────────────
@@ -302,71 +266,14 @@ class AdminWithdrawalActionView(APIView):
         action = serializer.validated_data['action']
         admin_note = serializer.validated_data.get('admin_note', '')
 
-        with db_transaction.atomic():
-            withdrawal = (
-                Withdrawal.objects.select_for_update().select_related('user').filter(
-                    id=pk, status__in=['otp_verified', 'processing']
-                ).first()
-            )
-            if not withdrawal:
-                return api_response(message='Withdrawal not found or not ready for action', status_str='error', http_status=404)
-            
+        try:
             if action == 'approve':
-                withdrawal.status = 'completed'
-                withdrawal.admin_note = admin_note
-                withdrawal.processed_at = timezone.now()
-                withdrawal.save()
-
-                profile = UserProfile.objects.select_for_update().get(user=withdrawal.user)
-                profile.total_withdrawn += withdrawal.amount
-                profile.save(update_fields=['total_withdrawn', 'updated_at'])
-
-                Transaction.objects.filter(
-                    reference=str(withdrawal.id), type='withdrawal'
-                ).update(status='success')
-
-                Notification.objects.create(
-                    user=withdrawal.user,
-                    title='Withdrawal Processed',
-                    message=f'Your withdrawal of ${withdrawal.amount} has been processed.',
-                    type='success',
-                )
-
-                send_html_email(
-                subject='Withdrawal Processed',
-                template_name='broadcast',
-                context={'user_name': 'User', 'message': f'Your withdrawal of ${withdrawal.amount} has been successfully processed.'},
-                recipient_list=[withdrawal.user.email],
-            )
+                complete_withdrawal(pk, admin_note)
                 return api_response(message='Withdrawal approved and marked as completed.')
-
-            else:  # reject → refund
-                withdrawal.status = 'rejected'
-                withdrawal.admin_note = admin_note
-                withdrawal.save()
-
-                profile = UserProfile.objects.select_for_update().get(user=withdrawal.user)
-                profile.wallet_balance += withdrawal.amount
-                profile.save(update_fields=['wallet_balance', 'updated_at'])
-
-                Transaction.objects.filter(
-                    reference=str(withdrawal.id), type='withdrawal'
-                ).update(status='failed')
-
-                Notification.objects.create(
-                    user=withdrawal.user,
-                    title='Withdrawal Rejected',
-                    message=f'Your withdrawal of ${withdrawal.amount} was rejected and refunded to your wallet. {admin_note}',
-                    type='warning',
-                )
-
-                send_html_email(
-                subject='Withdrawal Rejected',
-                template_name='broadcast',
-                context={'user_name': 'User', 'message': f'Your withdrawal of ${withdrawal.amount} was rejected. Reason: {admin_note}. The amount has been refunded to your wallet.'},
-                recipient_list=[withdrawal.user.email],
-            )
-                return api_response(message='Withdrawal rejected and amount refunded to user wallet.')
+            reject_withdrawal(pk, admin_note)
+            return api_response(message='Withdrawal rejected and amount refunded to user wallet.')
+        except WithdrawalNotActionable:
+            return api_response(message='Withdrawal not found or not ready for action', status_str='error', http_status=404)
 
 
 # ─── Investment Plan Management ───────────────────────────────────────────────
@@ -423,14 +330,19 @@ class AdminBroadcastView(APIView):
 
         user_list = list(users.values('id', 'email', 'first_name', 'last_name'))
 
+        sent = failed = 0
         for user_data in user_list:
             full_name = f"{user_data['first_name']} {user_data['last_name']}".strip() or 'Valued Member'
-            send_html_email(
+            ok = send_html_email(
                 subject=subject,
                 template_name='broadcast',
                 context={'user_name': full_name, 'message': message},
                 recipient_list=[user_data['email']],
             )
+            if ok:
+                sent += 1
+            else:
+                failed += 1
 
         notifications = [
             Notification(user_id=u['id'], title=subject, message=message, type='info')
@@ -438,4 +350,108 @@ class AdminBroadcastView(APIView):
         ]
         Notification.objects.bulk_create(notifications, batch_size=200)
 
-        return api_response(message=f'Broadcast queued for {len(user_list)} users.')
+        summary = f'Broadcast emailed to {sent} of {len(user_list)} users.'
+        if failed:
+            summary += f' {failed} failed - see Email Logs (status = failed) for the reason; you can retry them there.'
+        return api_response(
+            data={'total': len(user_list), 'sent': sent, 'failed': failed},
+            message=summary,
+        )
+
+
+# ─── Email health / logs ─────────────────────────────────────────────────────
+@extend_schema(tags=['Admin — Email'])
+class AdminEmailLogListView(APIView):
+    """Delivery log + configuration check, so admins can see whether emails really go out."""
+    permission_classes = [IsAdminUser]
+
+    @extend_schema(summary='List recent emails with delivery status, plus the email configuration report')
+    def get(self, request):
+        logs = EmailLog.objects.select_related('user').all()
+        status_value = request.query_params.get('status')
+        if status_value in ('sent', 'failed'):
+            logs = logs.filter(status=status_value)
+        search = request.query_params.get('search')
+        if search:
+            logs = logs.filter(Q(recipient__icontains=search) | Q(subject__icontains=search))
+
+        try:
+            limit = max(1, min(int(request.query_params.get('limit', 100)), 500))
+        except ValueError:
+            limit = 100
+
+        since = timezone.now() - timedelta(hours=24)
+        recent = EmailLog.objects.filter(created_at__gte=since)
+        last_failure = EmailLog.objects.filter(status='failed').first()
+
+        return api_response(data={
+            'summary': {
+                'sent_24h': recent.filter(status='sent').count(),
+                'failed_24h': recent.filter(status='failed').count(),
+                'failed_total': EmailLog.objects.filter(status='failed').count(),
+                'last_failure_at': last_failure.created_at if last_failure else None,
+                'last_failure_error': last_failure.error if last_failure else None,
+                'last_failure_hint': explain_smtp_error(last_failure.error) if last_failure else '',
+            },
+            'config': email_config_report(),
+            'logs': AdminEmailLogSerializer(logs[:limit], many=True).data,
+        })
+
+
+@extend_schema(tags=['Admin — Email'])
+class AdminEmailLogRetryView(APIView):
+    permission_classes = [IsAdminUser]
+
+    @extend_schema(summary='Re-send a failed email')
+    def post(self, request, pk):
+        log = EmailLog.objects.select_related('user').filter(id=pk).first()
+        if not log:
+            return api_response(message='Email log not found.', status_str='error', http_status=404)
+        if not log.retryable:
+            return api_response(
+                message='This email cannot be re-sent (it was already delivered, or it contained a one-time code - ask the user to request a new code).',
+                status_str='error', http_status=400,
+            )
+        ok = retry_email(log)
+        log.refresh_from_db()
+        if ok:
+            return api_response(data=AdminEmailLogSerializer(log).data, message='Email re-sent successfully.')
+        return api_response(
+            data=AdminEmailLogSerializer(log).data,
+            message=f'Still failing: {log.error}',
+            status_str='error', http_status=502,
+        )
+
+
+@extend_schema(tags=['Admin — Email'])
+class AdminEmailTestView(APIView):
+    """Send a real test email and report the exact SMTP error if it fails."""
+    permission_classes = [IsAdminUser]
+
+    @extend_schema(request=AdminEmailTestSerializer, summary='Send a test email')
+    def post(self, request):
+        serializer = AdminEmailTestSerializer(data=request.data)
+        if not serializer.is_valid():
+            return api_response(message='Validation failed.', status_str='error', errors=serializer.errors, http_status=400)
+
+        to = serializer.validated_data.get('to') or request.user.email
+        try:
+            send_html_email(
+                subject='PipsTrust email test',
+                template_name='broadcast',
+                context={
+                    'user': request.user,
+                    'user_name': request.user.full_name,
+                    'message': 'This is a test email from the PipsTrust admin panel. If you can read it, email delivery works.',
+                },
+                recipient_list=[to],
+                raise_on_error=True,
+            )
+        except Exception as exc:
+            error = f'{type(exc).__name__}: {exc}'
+            return api_response(
+                data={'error': error, 'hint': explain_smtp_error(error), 'config': email_config_report()},
+                message=f'Test email to {to} FAILED: {error}',
+                status_str='error', http_status=502,
+            )
+        return api_response(message=f'Test email sent to {to}. Check the inbox (and the spam folder).')

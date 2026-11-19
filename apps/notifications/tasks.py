@@ -1,138 +1,29 @@
-# from celery import shared_task
-# from django.core.mail import send_mail
-# from django.conf import settings
-# from django.utils import timezone
-
-
-# @shared_task(bind=True, max_retries=3, default_retry_delay=60)
-# def send_notification_email(self, subject, message, recipient_list=None):
-#     """
-#     Send email notification.
-#     If recipient_list is None, sends to the admin email.
-#     """
-#     try:
-#         if recipient_list is None:
-#             recipient_list = [settings.ADMIN_EMAIL]
-
-#         send_mail(
-#             subject=subject,
-#             message=message,
-#             from_email=settings.DEFAULT_FROM_EMAIL,
-#             recipient_list=recipient_list,
-#             fail_silently=False,
-#         )
-#     except Exception as exc:
-#         raise self.retry(exc=exc)
-
-
-# @shared_task
-# def process_matured_investments():
-#     """
-#     Periodic task: credit ROI for matured investments.
-#     Run every hour via Celery Beat.
-#     """
-#     from apps.investments.models import Investment, Transaction
-#     from apps.users.models import UserProfile
-
-#     now = timezone.now()
-#     matured = Investment.objects.filter(status='active', ends_at__lte=now)
-
-#     for investment in matured:
-#         try:
-#             profile = investment.user.profile
-#             profile.wallet_balance += investment.expected_return
-#             profile.total_earned += investment.expected_return - investment.amount
-#             profile.save()
-
-#             investment.status = 'completed'
-#             investment.actual_return = investment.expected_return
-#             investment.completed_at = now
-#             investment.save()
-
-#             Transaction.objects.create(
-#                 user=investment.user,
-#                 type='roi',
-#                 amount=investment.expected_return,
-#                 status='success',
-#                 description=f'ROI credited for investment #{str(investment.id)[:8]}',
-#                 reference=str(investment.id),
-#             )
-
-#             send_notification_email.delay(
-#                 subject='Investment Matured — ROI Credited',
-#                 message=(
-#                     f'Hello {investment.user.full_name},\n\n'
-#                     f'Your investment of ${investment.amount} on the {investment.plan.name} plan '
-#                     f'has matured. ${investment.expected_return} has been credited to your wallet.\n\n'
-#                     f'PipsTrust Team'
-#                 ),
-#                 recipient_list=[investment.user.email],
-#             )
-#         except Exception as e:
-#             # Log and continue — don't fail all investments because of one
-#             print(f'Error processing investment {investment.id}: {e}')
-
-
-# @shared_task
-# def send_referral_bonus(referrer_id, new_user_email, bonus_amount):
-#     """Credit referral bonus to referrer's wallet."""
-#     from apps.users.models import User
-#     from apps.investments.models import Transaction
-
-#     try:
-#         referrer = User.objects.get(id=referrer_id)
-#         profile = referrer.profile
-#         profile.wallet_balance += bonus_amount
-#         profile.total_earned += bonus_amount
-#         profile.save()
-
-#         Transaction.objects.create(
-#             user=referrer,
-#             type='referral_bonus',
-#             amount=bonus_amount,
-#             status='success',
-#             description=f'Referral bonus for inviting {new_user_email}',
-#         )
-
-#         send_notification_email.delay(
-#             subject='Referral Bonus Credited',
-#             message=(
-#                 f'Hello {referrer.full_name},\n\n'
-#                 f'You earned a referral bonus of ${bonus_amount} '
-#                 f'for inviting {new_user_email} to PipsTrust!\n\n'
-#                 f'PipsTrust Team'
-#             ),
-#             recipient_list=[referrer.email],
-#         )
-#     except Exception as e:
-#         print(f'Referral bonus error: {e}')
-
+import logging
+from decimal import Decimal
 
 from celery import shared_task
-from django.core.mail import send_mail
 from django.conf import settings
-from django.utils import timezone
+from django.db import transaction
+
+logger = logging.getLogger(__name__)
 
 
-@shared_task(bind=True, max_retries=3, default_retry_delay=60)
-def send_notification_email(self, subject, message, recipient_list=None):
+@shared_task
+def send_notification_email(subject, message, recipient_list=None):
+    """Send a plain notification (broadcast template). Defaults to the admin recipients.
+
+    Delivery problems are recorded in EmailLog by send_html_email, so they are visible
+    to admins instead of disappearing into a Celery retry loop.
     """
-    Send email notification.
-    If recipient_list is None, sends to the admin email.
-    """
-    try:
-        if recipient_list is None:
-            recipient_list = [settings.ADMIN_EMAIL]
+    from apps.notifications.email_utils import get_admin_emails, send_html_email
 
-        send_mail(
-            subject=subject,
-            message=message,
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=recipient_list,
-            fail_silently=False,
-        )
-    except Exception as exc:
-        raise self.retry(exc=exc)
+    recipients = recipient_list or get_admin_emails()
+    return send_html_email(
+        subject=subject,
+        template_name='broadcast',
+        context={'user_name': 'there', 'message': message},
+        recipient_list=recipients,
+    )
 
 
 @shared_task
@@ -140,50 +31,58 @@ def process_matured_investments():
     """Periodic safety net for completing matured investments."""
     from apps.investments.services import settle_matured_investments
 
-    completed = settle_matured_investments()
-    for investment in completed:
-        send_notification_email.delay(
-            subject='Investment Completed — Return Credited',
-            message=(
-                f'Hello {investment.user.full_name},\n\n'
-                f'Your investment of ${investment.amount} on the {investment.plan.name} plan '
-                f'has completed. ${investment.expected_return} has been credited to your wallet.\n\n'
-                'PipsTrust Team'
-            ),
-            recipient_list=[investment.user.email],
-        )
+    settle_matured_investments()
 
 
 @shared_task
 def send_referral_bonus(referrer_id, new_user_email, bonus_amount):
-    """Credit referral bonus to referrer's wallet."""
-    from apps.users.models import User
+    """Credit the referral bonus to the referrer's wallet (once) and email them."""
     from apps.investments.models import Transaction
+    from apps.notifications.email_utils import send_html_email
+    from apps.notifications.models import Notification
+    from apps.users.models import User, UserProfile
+
+    bonus = Decimal(str(bonus_amount))
+    description = f'Referral bonus for inviting {new_user_email}'
 
     try:
-        referrer = User.objects.get(id=referrer_id)
-        profile = referrer.profile
-        profile.wallet_balance += bonus_amount
-        profile.total_earned += bonus_amount
-        profile.save()
+        with transaction.atomic():
+            referrer = User.objects.get(id=referrer_id)
+            UserProfile.objects.get_or_create(user=referrer)
+            profile = UserProfile.objects.select_for_update().get(user=referrer)
 
-        Transaction.objects.create(
-            user=referrer,
-            type='referral_bonus',
-            amount=bonus_amount,
-            status='success',
-            description=f'Referral bonus for inviting {new_user_email}',
-        )
+            # Idempotent: never pay the same referral twice.
+            if Transaction.objects.filter(
+                user=referrer, type='referral_bonus', description=description
+            ).exists():
+                return
 
-        send_notification_email.delay(
-            subject='Referral Bonus Credited',
-            message=(
-                f'Hello {referrer.full_name},\n\n'
-                f'You earned a referral bonus of ${bonus_amount} '
-                f'for inviting {new_user_email} to RapidTrusts!\n\n'
-                f'PipsTrust Team'
+            profile.wallet_balance += bonus
+            profile.total_earned += bonus
+            profile.save(update_fields=['wallet_balance', 'total_earned', 'updated_at'])
+
+            Transaction.objects.create(
+                user=referrer, type='referral_bonus', amount=bonus,
+                status='success', description=description,
+            )
+            Notification.objects.create(
+                user=referrer, title='Referral Bonus Credited',
+                message=f'You earned ${bonus} for inviting {new_user_email}.', type='success',
+            )
+    except Exception:
+        logger.exception('Referral bonus failed for referrer %s', referrer_id)
+        return
+
+    send_html_email(
+        subject='Referral Bonus Credited - PipsTrust',
+        template_name='broadcast',
+        context={
+            'user': referrer,
+            'user_name': referrer.full_name,
+            'message': (
+                f'You earned a referral bonus of ${bonus} for inviting {new_user_email} to PipsTrust!\n\n'
+                'It has been added to your wallet balance.'
             ),
-            recipient_list=[referrer.email],
-        )
-    except Exception as e:
-        print(f'Referral bonus error: {e}')
+        },
+        recipient_list=[referrer.email],
+    )

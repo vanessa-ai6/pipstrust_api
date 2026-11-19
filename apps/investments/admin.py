@@ -1,9 +1,6 @@
 from django.contrib import admin
-from django.utils import timezone
-from django.db import transaction as db_transaction
 from .models import InvestmentPlan, Deposit, Investment, Transaction
-from apps.notifications.models import Notification
-from apps.notifications.email_utils import send_html_email
+from .services import DepositNotPending, confirm_deposit, reject_deposit
 
 
 @admin.register(InvestmentPlan)
@@ -19,73 +16,31 @@ class DepositAdmin(admin.ModelAdmin):
     list_filter = ['status', 'payment_method']
     search_fields = ['user__email', 'transaction_hash']
     actions = ['approve_deposits', 'reject_deposits']
+    # Status can only change through the actions below. Editing the status field by hand
+    # marked deposits "confirmed" WITHOUT crediting the wallet.
+    readonly_fields = ['status', 'confirmed_at']
 
+    @admin.action(description='Approve selected deposits (credits wallet)')
     def approve_deposits(self, request, queryset):
-        with db_transaction.atomic():
-            for deposit in queryset.filter(status='pending'):
-                deposit.status = 'confirmed'
-                deposit.confirmed_at = timezone.now()
-                deposit.save()
+        done = skipped = 0
+        for deposit_id in list(queryset.filter(status='pending').values_list('id', flat=True)):
+            try:
+                confirm_deposit(deposit_id)
+                done += 1
+            except DepositNotPending:
+                skipped += 1
+        self.message_user(request, f'{done} deposit(s) approved and credited to wallets. {skipped} skipped.')
 
-                profile = deposit.user.profile
-                profile.wallet_balance += deposit.amount
-                profile.save()
-
-                Transaction.objects.filter(
-                    reference=str(deposit.id), type='deposit'
-                ).update(status='success')
-
-                Notification.objects.create(
-                    user=deposit.user,
-                    title='Deposit Confirmed',
-                    message=f'Your deposit of ${deposit.amount} has been confirmed.',
-                    type='success',
-                )
-
-                send_html_email(
-                    subject='Deposit Confirmed - PipsTrust',
-                    template_name='deposit_confirmed',
-                    context={
-                        'user': deposit.user,
-                        'user_name': deposit.user.full_name,
-                        'amount': deposit.amount,
-                        'payment_method': deposit.get_payment_method_display(),
-                        'date': timezone.now().strftime('%B %d, %Y %I:%M %p UTC'),
-                    },
-                    recipient_list=[deposit.user.email],
-                )
-
-        self.message_user(request, 'Selected deposits approved successfully.')
-    approve_deposits.short_description = 'Approve selected deposits'
-
+    @admin.action(description='Reject selected deposits')
     def reject_deposits(self, request, queryset):
-        with db_transaction.atomic():
-            for deposit in queryset.filter(status='pending'):
-                deposit.status = 'rejected'
-                deposit.save()
-
-                Notification.objects.create(
-                    user=deposit.user,
-                    title='Deposit Rejected',
-                    message=f'Your deposit of ${deposit.amount} was rejected.',
-                    type='error',
-                )
-
-                send_html_email(
-                    subject='Deposit Rejected - PipsTrust',
-                    template_name='deposit_rejected',
-                    context={
-                        'user': deposit.user,
-                        'user_name': deposit.user.full_name,
-                        'amount': deposit.amount,
-                        'payment_method': deposit.get_payment_method_display(),
-                        'date': timezone.now().strftime('%B %d, %Y %I:%M %p UTC'),
-                    },
-                    recipient_list=[deposit.user.email],
-                )
-
-        self.message_user(request, 'Selected deposits rejected.')
-    reject_deposits.short_description = 'Reject selected deposits'
+        done = skipped = 0
+        for deposit_id in list(queryset.filter(status='pending').values_list('id', flat=True)):
+            try:
+                reject_deposit(deposit_id)
+                done += 1
+            except DepositNotPending:
+                skipped += 1
+        self.message_user(request, f'{done} deposit(s) rejected. {skipped} skipped.')
 
 
 @admin.register(Investment)

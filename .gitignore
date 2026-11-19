@@ -1,0 +1,21 @@
+# Secrets: never commit these. Put the values in the hosting dashboard instead.
+.env
+.env.*
+!.env.example
+!.env.production.example
+
+# Local database, uploads and generated files
+db.sqlite3
+media/
+staticfiles/
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
