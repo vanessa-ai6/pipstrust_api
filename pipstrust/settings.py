@@ -37,6 +37,7 @@ THIRD_PARTY_APPS = [
     'drf_spectacular',
     'django_celery_beat',
     'django_celery_results',
+    'anymail',
 ]
 
 LOCAL_APPS = [
@@ -195,7 +196,13 @@ SIMPLE_JWT = {
    'USER_ID_CLAIM': 'user_id',
 }
 # ─── Email ────────────────────────────────────────────────────────────────────
-EMAIL_BACKEND = config('EMAIL_BACKEND', default='django.core.mail.backends.smtp.EmailBackend')
+from .email_provider import load_email_settings
+
+_email = load_email_settings()
+EMAIL_BACKEND = _email.get('EMAIL_BACKEND', 'django.core.mail.backends.smtp.EmailBackend') 
+ANYMAIL = _email.get('ANYMAIL', {})
+
+# SMTP settings (used if EMAIL_PROVIDER is 'smtp' or not set)
 EMAIL_HOST = config('EMAIL_HOST', default='smtp.gmail.com')
 EMAIL_PORT = config('EMAIL_PORT', default=587, cast=int)
 EMAIL_USE_TLS = config('EMAIL_USE_TLS', default=True, cast=bool)
@@ -206,12 +213,6 @@ EMAIL_HOST_USER = config('EMAIL_HOST_USER', default='')
 EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='')
 
 
-BREVO_API_KEY = config('BREVO_API_KEY', '').strip()
-RESEND_API_KEY = config('RESEND_API_KEY', '').strip()
-EMAIL_PROVIDER = config('EMAIL_PROVIDER', '').strip().lower()
-if not EMAIL_PROVIDER:
-    EMAIL_PROVIDER = 'brevo' if BREVO_API_KEY else 'resend' if RESEND_API_KEY else ''
-EMAIL_API_KEY = {'brevo': BREVO_API_KEY, 'resend': RESEND_API_KEY}.get(EMAIL_PROVIDER, '')
 
 DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default='PipsTrust <noreply@pipstrust.com>')
 SERVER_EMAIL = DEFAULT_FROM_EMAIL
